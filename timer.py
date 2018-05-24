@@ -6,8 +6,7 @@ import argparse
 import re
 import asyncio
 import os
-
-# SEE: https://stackoverflow.com/questions/375427/non-blocking-read-on-a-subprocess-pipe-in-python/437888
+from AnsiTextStyleEscapeChars import AnsiTextStyleEscapeChars as COLOR
 
 def escape_ansi(line):
     ansi_escape = re.compile(r'(\x9B|\x1B\[)[0-?]*[ -/]*[@-~]')
@@ -28,21 +27,47 @@ scala_files = list(filter(
 print('Scala files\n' + str(len(scala_files)))
 
 class SubprocessProtocol(asyncio.SubprocessProtocol):
-    def pipe_data_received(self, fd, data):
-        if fd == 1: # got stdout data (bytes)
-            print('GOT STDOUT:')
-            print(escape_ansi(data.decode()))
+    def __init__(self, loop):
+        self.loop = loop
+
+    def connection_made(self, transport):
+        self.transport = transport
 
     def connection_lost(self, exc):
-        loop.stop() # end loop.run_forever()
+        self.loop.stop() # end loop.run_forever()
+
+    def pipe_data_received(self, fd, data):
+        if fd == 1: # got stdout data (bytes)
+            lineWithNewLine = escape_ansi(data.decode())
+            self.onStdOutLine(lineWithNewLine[:-1])
+
+    def onStdOutLine(self, line):
+        if line.startswith('[error]'):
+            line_color = COLOR.FAIL
+        else:
+            line_color = COLOR.OKGREEN
+
+        print(f'{line_color}sbt: {line}{COLOR.ENDC}')
+
+        if line.endswith('>'):
+            print('\nCompiling...\n')
+
+            self.transport.get_pipe_transport(0).write('compile\n'.encode())
+
 
 if os.name == 'nt':
     loop = asyncio.ProactorEventLoop() # for subprocess' pipes on Windows
     asyncio.set_event_loop(loop)
 else:
     loop = asyncio.get_event_loop()
+
 try:
-    loop.run_until_complete(loop.subprocess_exec(SubprocessProtocol, 'sbt', cwd = project_root))
+    loop.run_until_complete(loop.subprocess_exec(
+        lambda: SubprocessProtocol(loop),
+        'sbt',
+        cwd = project_root
+    ))
+
     loop.run_forever()
 finally:
     loop.close()
