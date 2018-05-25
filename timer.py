@@ -26,9 +26,17 @@ scala_files = list(filter(
 
 print('Scala files\n' + str(len(scala_files)))
 
+
+# Protocol states
+
+class WarmingUp:
+    def __init__(self, warmups_left):
+        self.warmups_left = warmups_left
+
 class SubprocessProtocol(asyncio.SubprocessProtocol):
     def __init__(self, loop):
         self.loop = loop
+        self.state = WarmingUp(3)
 
     def connection_made(self, transport):
         self.transport = transport
@@ -50,24 +58,32 @@ class SubprocessProtocol(asyncio.SubprocessProtocol):
         print(f'{line_color}sbt: {line}{COLOR.ENDC}')
 
         if line.endswith('>'):
-            print('\nCompiling...\n')
+            if isinstance(self.state, WarmingUp) and self.state.warmups_left > 0:
+                self.state = WarmingUp(self.state.warmups_left - 1)
+                self._tell_sbt(';clean; test:compile')
+            else:
+                self.loop.stop()
 
-            self.transport.get_pipe_transport(0).write('compile\n'.encode())
+    def _tell_sbt(self, cmd):
+        print(f'{COLOR.OKBLUE}running: {cmd}{COLOR.ENDC}')
+        self.transport.get_pipe_transport(0).write(f'{cmd}\n'.encode())
 
+def run_sbt_loop():
+    if os.name == 'nt':
+        loop = asyncio.ProactorEventLoop() # for subprocess' pipes on Windows
+        asyncio.set_event_loop(loop)
+    else:
+        loop = asyncio.get_event_loop()
 
-if os.name == 'nt':
-    loop = asyncio.ProactorEventLoop() # for subprocess' pipes on Windows
-    asyncio.set_event_loop(loop)
-else:
-    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(loop.subprocess_exec(
+            lambda: SubprocessProtocol(loop),
+            'sbt',
+            cwd = project_root
+        ))
 
-try:
-    loop.run_until_complete(loop.subprocess_exec(
-        lambda: SubprocessProtocol(loop),
-        'sbt',
-        cwd = project_root
-    ))
+        loop.run_forever()
+    finally:
+        loop.close()
 
-    loop.run_forever()
-finally:
-    loop.close()
+run_sbt_loop()
